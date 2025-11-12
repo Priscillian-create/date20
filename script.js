@@ -245,6 +245,7 @@ const DataModule = {
                         if (product.expirydate && !product.expiryDate) product.expiryDate = product.expirydate;
                         return product;
                     });
+                    // FIX: Added this missing function call
                     state.products = this.mergeProductData(normalizedProducts.filter(p => !p.deleted));
                     saveToLocalStorage();
                     return state.products;
@@ -262,6 +263,44 @@ const DataModule = {
             }
             return state.products;
         }
+    },
+
+    // FIX: Added this missing function
+    mergeProductData(serverProducts) {
+        const serverProductsMap = {};
+        serverProducts.forEach(product => {
+            serverProductsMap[product.id] = product;
+        });
+        
+        const localProductsMap = {};
+        state.products.forEach(product => {
+            if (product && product.id) {
+                localProductsMap[product.id] = product;
+            }
+        });
+        
+        const mergedProducts = [];
+        
+        serverProducts.forEach(serverProduct => {
+            const localProduct = localProductsMap[serverProduct.id];
+            
+            if (localProduct) {
+                const serverDate = new Date(serverProduct.updated_at || serverProduct.created_at || 0);
+                const localDate = new Date(localProduct.updated_at || localProduct.created_at || 0);
+                
+                mergedProducts.push(localDate > serverDate ? localProduct : serverProduct);
+            } else {
+                mergedProducts.push(serverProduct);
+            }
+        });
+        
+        state.products.forEach(localProduct => {
+            if (localProduct && localProduct.id && !serverProductsMap[localProduct.id]) {
+                mergedProducts.push(localProduct);
+            }
+        });
+        
+        return mergedProducts;
     },
 
     async fetchSales() {
@@ -867,14 +906,14 @@ async function showApp() {
         if (salesResult.status === 'fulfilled') state.sales = salesResult.value;
         
         loadProducts();
-        loadSales();
+        loadSales(); // This function is now defined below
         setupRealtimeListeners();
     } catch (error) {
         console.error('Error loading initial data:', error);
         showNotification('Error loading data. Using offline cache.', 'warning');
         
         loadProducts();
-        loadSales();
+        loadSales(); // This function is now defined below
         setupRealtimeListeners();
     }
 }
@@ -1020,6 +1059,56 @@ function updateCart() {
     
     DOM.totalEl.textContent = formatCurrency(total);
 }
+
+// FIX: Added this missing function
+function loadSales() {
+    if (!DOM.salesTableBody) return; // Exit if the element doesn't exist on the page
+
+    if (state.sales.length === 0) {
+        DOM.salesTableBody.innerHTML = `
+            <tr>
+                <td colspan="6" style="text-align: center; padding: 20px; color: #999;">
+                    No sales recorded yet
+                </td>
+            </tr>
+        `;
+        return;
+    }
+    
+    DOM.salesTableBody.innerHTML = '';
+    
+    state.sales.forEach(sale => {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>${sale.receiptNumber || 'N/A'}</td>
+            <td>${formatDate(sale.created_at)}</td>
+            <td>${sale.cashier || 'Unknown'}</td>
+            <td>${sale.items ? sale.items.length : 0}</td>
+            <td>${formatCurrency(sale.total || 0)}</td>
+            <td>
+                <button class="btn-small" onclick="viewSaleDetails('${sale.receiptNumber}')">
+                    <i class="fas fa-eye"></i> View
+                </button>
+            </td>
+        `;
+        DOM.salesTableBody.appendChild(row);
+    });
+}
+
+// FIX: Added this helper function called by loadSales
+function viewSaleDetails(receiptNumber) {
+    const sale = state.sales.find(s => s.receiptNumber === receiptNumber);
+    if (!sale) {
+        showNotification('Sale details not found', 'error');
+        return;
+    }
+    
+    // For now, just log the details. You can expand this to show a modal.
+    console.log('Viewing sale details:', sale);
+    showNotification(`Viewing details for Receipt #${receiptNumber}`, 'info');
+    // TODO: Implement a modal to display sale.items and other details
+}
+
 
 // Placeholder functions for brevity - implement as needed
 function loadInventory() { /* Implementation for loading inventory page */ }
