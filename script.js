@@ -11,7 +11,7 @@ const supabase = window.supabase.createClient(
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImllcmlwaGR6bGJ1enFxd3J5bXduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIzMDU1MTgsImV4cCI6MjA3Nzg4MTUxOH0.bvbs6joSxf1u9U8SlaAYmjve-N6ArNYcNMtnG6-N_HU'
 );
 
-// Global State - Corrected
+// Global State
 const state = {
     products: [], cart: [], sales: [], deletedSales: [], users: [], currentUser: null,
     expenses: [], purchases: [], stockAlerts: [], profitData: [],
@@ -20,16 +20,14 @@ const state = {
     settings: {
         storeName: "Pa Gerrys Mart", storeAddress: "Alatishe, Ibeju Lekki, Lagos State, Nigeria",
         storePhone: "+2347037850121", lowStockThreshold: 10, expiryWarningDays: 90
-    } // <-- Removed trailing comma
-    ,
-    expenseCategories: ['Rent', 'Utilities', 'Salaries', 'Supplies', 'Marketing', 'Maintenance', 'Other'] // <-- Removed trailing comma
-    ,
+    },
+    expenseCategories: ['Rent', 'Utilities', 'Salaries', 'Supplies', 'Marketing', 'Maintenance', 'Other'],
     STORAGE_KEYS: {
         PRODUCTS: 'pagerrysmart_products', SALES: 'pagerrysmart_sales', DELETED_SALES: 'pagerrysmart_deleted_sales',
         USERS: 'pagerrysmart_users', SETTINGS: 'pagerrysmart_settings', CURRENT_USER: 'pagerrysmart_current_user',
         EXPENSES: 'pagerrysmart_expenses', PURCHASES: 'pagerrysmart_purchases',
         STOCK_ALERTS: 'pagerrysmart_stock_alerts', PROFIT_DATA: 'pagerrysmart_profit_data'
-    } // <-- Removed trailing comma
+    }
 };
 
 // DOM Elements Cache
@@ -265,24 +263,113 @@ const DataModule = {
             return state.products;
         }
     },
-    
-    mergeProductData(serverProducts) {
-        const serverMap = serverProducts.reduce((map, p) => (map[p.id] = p, map), {});
-        const localMap = state.products.reduce((map, p) => (map[p.id] = p, map), {});
-        
-        const merged = serverProducts.map(serverProduct => {
-            const localProduct = localMap[serverProduct.id];
-            if (!localProduct) return serverProduct;
-            
-            const serverDate = new Date(serverProduct.updated_at || serverProduct.created_at || 0);
-            const localDate = new Date(localProduct.updated_at || localProduct.created_at || 0);
-            return localDate > serverDate ? localProduct : serverProduct;
-        });
-        
-        state.products.filter(p => !serverMap[p.id]).forEach(p => merged.push(p));
-        return merged;
+
+    async fetchSales() {
+        try {
+            if (state.isOnline) {
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Request timeout')), 15000)
+                );
+                
+                const fetchPromise = supabase
+                    .from('sales')
+                    .select('*')
+                    .order('created_at', { ascending: false });
+                
+                const { data, error } = await Promise.race([fetchPromise, timeoutPromise]);
+                
+                if (error) {
+                    console.error('Supabase fetch error:', error);
+                    if (error.code === '42P17' || error.message.includes('infinite recursion')) {
+                        showNotification('Database policy issue for sales. Using local cache.', 'warning');
+                    } else if (error.code === '42501' || error.message.includes('policy')) {
+                        showNotification('Permission denied for sales. Using local cache.', 'warning');
+                    } else {
+                        throw error;
+                    }
+                } else if (data && Array.isArray(data)) {
+                    const validatedSales = data.map(sale => {
+                        if (!sale.receiptNumber && sale.receiptnumber) {
+                            sale.receiptNumber = sale.receiptnumber;
+                        } else if (!sale.receiptNumber && !sale.receiptnumber) {
+                            sale.receiptNumber = `UNKNOWN_${Date.now()}`;
+                        }
+                        
+                        if (!sale.items) sale.items = [];
+                        if (typeof sale.total !== 'number') {
+                            sale.total = parseFloat(sale.total) || 0;
+                        }
+                        if (!sale.created_at) {
+                            sale.created_at = new Date().toISOString();
+                        }
+                        return sale;
+                    });
+                    
+                    state.sales = this.mergeSalesData(validatedSales);
+                    saveToLocalStorage();
+                    return state.sales;
+                }
+            }
+            return state.sales;
+        } catch (error) {
+            console.error('Error in fetchSales:', error);
+            if (error.message === 'Request timeout') {
+                showNotification('Connection timeout. Using local cache.', 'warning');
+            } else if (error.code === '42501' || error.message.includes('policy')) {
+                showNotification('Permission denied for sales. Using local cache.', 'warning');
+            } else if (error.code === '42P17' || error.message.includes('infinite recursion')) {
+                showNotification('Database policy issue detected. Using local cache.', 'warning');
+            } else {
+                showNotification('Error fetching sales: ' + error.message, 'error');
+            }
+            return state.sales;
+        }
     },
     
+    mergeSalesData(serverSales) {
+        const serverSalesMap = {};
+        serverSales.forEach(sale => {
+            serverSalesMap[sale.receiptNumber] = sale;
+        });
+        
+        const localSalesMap = {};
+        state.sales.forEach(sale => {
+            if (sale && sale.receiptNumber) {
+                localSalesMap[sale.receiptNumber] = sale;
+            }
+        });
+        
+        const mergedSales = [];
+        
+        serverSales.forEach(serverSale => {
+            const localSale = localSalesMap[serverSale.receiptNumber];
+            
+            if (localSale) {
+                const serverDate = new Date(serverSale.updated_at || serverSale.created_at || 0);
+                const localDate = new Date(localSale.updated_at || localSale.created_at || 0);
+                
+                mergedSales.push(localDate > serverDate ? localSale : serverSale);
+            } else {
+                mergedSales.push(serverSale);
+            }
+        });
+        
+        state.sales.forEach(localSale => {
+            if (localSale && localSale.receiptNumber && !serverSalesMap[localSale.receiptNumber]) {
+                mergedSales.push(localSale);
+            }
+        });
+        
+        mergedSales.sort((a, b) => {
+            const dateA = a.created_at ? new Date(a.created_at) : new Date(0);
+            const dateB = b.created_at ? new Date(b.created_at) : new Date(0);
+            return dateB - dateA;
+        });
+        
+        return mergedSales;
+    },
+    
+    // ... other DataModule methods would be similarly refactored
     async saveProduct(product) {
         const productModalLoading = $('product-modal-loading');
         const saveProductBtn = $('save-product-btn');
@@ -363,8 +450,7 @@ const DataModule = {
             if (saveProductBtn) saveProductBtn.disabled = false;
         }
     }
-    
-    // ... other DataModule methods would be similarly refactored for brevity
+    // ... other DataModule methods
 };
 
 // Local Storage Functions
@@ -405,6 +491,350 @@ function loadFromLocalStorage() {
     }
 }
 
+// Sync Queue Management
+function addToSyncQueue(operation) {
+    if (!operation.id) {
+        operation.id = 'op_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    }
+    
+    operation.timestamp = new Date().toISOString();
+    
+    if (operation.type === 'saveSale') {
+        const receiptNumber = operation.data.receiptNumber;
+        const existingIndex = state.syncQueue.findIndex(op => 
+            op.type === 'saveSale' && 
+            op.data.receiptNumber === receiptNumber
+        );
+        
+        if (existingIndex !== -1) {
+            state.syncQueue[existingIndex] = operation;
+        } else {
+            state.syncQueue.push(operation);
+        }
+    } else {
+        const existingIndex = state.syncQueue.findIndex(op => 
+            op.type === operation.type && 
+            op.data.id === operation.data.id
+        );
+        
+        if (existingIndex !== -1) {
+            state.syncQueue[existingIndex] = operation;
+        } else {
+            state.syncQueue.push(operation);
+        }
+    }
+    
+    localStorage.setItem('syncQueue', JSON.stringify(state.syncQueue));
+    
+    if (state.isOnline) {
+        processSyncQueue();
+    } else {
+        showNotification('Offline: Operation saved locally and will sync automatically.', 'info');
+    }
+}
+
+async function processSyncQueue() {
+    if (state.syncQueue.length === 0) return;
+    
+    const syncStatus = $('sync-status');
+    const syncStatusText = $('sync-status-text');
+    
+    if (syncStatus) {
+        syncStatus.classList.add('show', 'syncing');
+        syncStatusText.textContent = `Syncing ${state.syncQueue.length} operations...`;
+    }
+    
+    state.syncQueue.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    
+    for (let i = 0; i < state.syncQueue.length; i++) {
+        const operation = state.syncQueue[i];
+        
+        if (operation.synced) continue;
+        
+        try {
+            let success = false;
+            
+            if (operation.type === 'saveSale') {
+                success = await syncSale(operation);
+            } else if (operation.type === 'saveProduct') {
+                success = await syncProduct(operation);
+            }
+            
+            if (success) {
+                operation.synced = true;
+                operation.syncedAt = new Date().toISOString();
+            }
+        } catch (error) {
+            console.error(`Error syncing operation:`, operation.type, error);
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    localStorage.setItem('syncQueue', JSON.stringify(state.syncQueue));
+    
+    const originalLength = state.syncQueue.length;
+    state.syncQueue = state.syncQueue.filter(op => !op.synced);
+    
+    if (state.syncQueue.length < originalLength) {
+        localStorage.setItem('syncQueue', JSON.stringify(state.syncQueue));
+    }
+    
+    if (syncStatus && syncStatusText) {
+        if (state.syncQueue.length === 0) {
+            syncStatus.classList.remove('syncing');
+            syncStatus.classList.add('show');
+            syncStatusText.textContent = 'All data synced';
+            setTimeout(() => syncStatus.classList.remove('show'), 3000);
+            await refreshAllData();
+        } else {
+            syncStatus.classList.remove('syncing');
+            syncStatus.classList.add('error');
+            syncStatusText.textContent = `${state.syncQueue.length} operations pending`;
+            setTimeout(() => syncStatus.classList.remove('show', 'error'), 3000);
+        }
+    }
+}
+
+async function syncSale(operation) {
+    try {
+        let validCashierId = operation.data.cashierId || '00000000-0000-0000-0000-000000000000';
+        
+        if (!validCashierId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)) {
+            validCashierId = '00000000-0000-0000-0000-000000000000';
+        }
+        
+        operation.data.cashierId = validCashierId;
+        
+        const { data: existingSales, error: fetchError } = await supabase
+            .from('sales')
+            .select('*')
+            .eq('receiptnumber', operation.data.receiptNumber);
+        
+        if (fetchError) throw fetchError;
+        
+        if (!existingSales || existingSales.length === 0) {
+            const saleToSave = {
+                receiptnumber: operation.data.receiptNumber,
+                cashierid: validCashierId,
+                items: operation.data.items,
+                total: operation.data.total,
+                created_at: operation.data.created_at,
+                cashier: operation.data.cashier
+            };
+            
+            const { data, error } = await supabase
+                .from('sales')
+                .insert(saleToSave)
+                .select();
+            
+            if (error) throw error;
+            
+            if (data && data.length > 0) {
+                const localSaleIndex = state.sales.findIndex(s => s.receiptNumber === operation.data.receiptNumber);
+                if (localSaleIndex !== -1) {
+                    state.sales[localSaleIndex].id = data[0].id;
+                    state.sales[localSaleIndex].cashierId = validCashierId;
+                    saveToLocalStorage();
+                }
+                return true;
+            }
+        } else {
+            if (existingSales.length > 0) {
+                const localSaleIndex = state.sales.findIndex(s => s.receiptNumber === operation.data.receiptNumber);
+                if (localSaleIndex !== -1) {
+                    state.sales[localSaleIndex].id = existingSales[0].id;
+                    state.sales[localSaleIndex].cashierId = validCashierId;
+                    saveToLocalStorage();
+                }
+            }
+            return true;
+        }
+        
+        return false;
+    } catch (error) {
+        console.error('Error syncing sale:', error);
+        return false;
+    }
+}
+
+async function syncProduct(operation) {
+    try {
+        if (operation.data.stock !== undefined && !operation.data.name) {
+            const { error } = await supabase
+                .from('products')
+                .update({ stock: operation.data.stock })
+                .eq('id', operation.data.id);
+            
+            if (error) throw error;
+        } else {
+            if (operation.data.id && !String(operation.data.id).startsWith('temp_')) {
+                const productToSave = {
+                    name: operation.data.name,
+                    category: operation.data.category,
+                    price: operation.data.price,
+                    stock: operation.data.stock,
+                    expirydate: operation.data.expiryDate,
+                    barcode: operation.data.barcode
+                };
+                
+                const { data, error } = await supabase
+                    .from('products')
+                    .insert(productToSave)
+                    .select();
+                
+                if (error) throw error;
+                
+                if (data && data.length > 0) {
+                    const localProductIndex = state.products.findIndex(p => p.id === operation.data.id);
+                    if (localProductIndex !== -1) {
+                        state.products[localProductIndex].id = data[0].id;
+                        saveToLocalStorage();
+                    }
+                }
+            }
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('Error syncing product:', error);
+        return false;
+    }
+}
+
+// Connection Management
+function checkSupabaseConnection() {
+    if (!state.isOnline) {
+        updateConnectionStatus('offline', 'Offline');
+        return;
+    }
+    
+    updateConnectionStatus('checking', 'Checking connection...');
+    
+    supabase.from('products').select('count').limit(1)
+        .then(() => {
+            state.connectionRetryCount = 0;
+            updateConnectionStatus('online', 'Connected');
+            if (state.syncQueue.length > 0) processSyncQueue();
+        })
+        .catch(error => {
+            updateConnectionStatus('offline', 'Connection failed');
+            
+            if (error.code === '42P17' || error.message.includes('infinite recursion')) {
+                showNotification('Database policy issue detected. Some features may be limited.', 'warning');
+                return;
+            }
+            
+            if (state.connectionRetryCount < state.MAX_RETRY_ATTEMPTS) {
+                state.connectionRetryCount++;
+                setTimeout(checkSupabaseConnection, state.RETRY_DELAY);
+            } else {
+                showNotification('Connection to database failed. Some features may be limited.', 'warning');
+            }
+        });
+}
+
+function updateConnectionStatus(status, message) {
+    const statusEl = $('connection-status');
+    const textEl = $('connection-text');
+    
+    if (statusEl && textEl) {
+        statusEl.className = 'connection-status ' + status;
+        textEl.textContent = message;
+    }
+}
+
+// Realtime Listeners
+function setupRealtimeListeners() {
+    if (state.isOnline) {
+        supabase
+            .channel('products-changes')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => {
+                DataModule.fetchProducts().then(updatedProducts => {
+                    state.products = updatedProducts;
+                    saveToLocalStorage();
+                    loadProducts();
+                    checkAndGenerateAlerts();
+                });
+            })
+            .subscribe();
+        
+        supabase
+            .channel('sales-changes')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'sales' }, () => {
+                DataModule.fetchSales().then(updatedSales => {
+                    state.sales = updatedSales;
+                    saveToLocalStorage();
+                    loadSales();
+                });
+            })
+            .subscribe();
+    }
+}
+
+// Stock Alert System
+function checkAndGenerateAlerts() {
+    const alerts = {
+        expired: [], expiringSoon: [], lowStock: [], outOfStock: []
+    };
+    
+    const today = new Date();
+    
+    state.products.forEach(product => {
+        if (product.deleted) return;
+        
+        const expiryDate = new Date(product.expiryDate);
+        const daysUntilExpiry = Math.ceil((expiryDate - today) / (1000 * 60 * 60 * 24));
+        
+        if (daysUntilExpiry < 0) {
+            alerts.expired.push({
+                id: product.id, name: product.name, expiryDate: product.expiryDate,
+                daysExpired: Math.abs(daysUntilExpiry), severity: 'critical',
+                message: `CRITICAL: ${product.name} expired ${Math.abs(daysUntilExpiry)} days ago`
+            });
+        } else if (daysUntilExpiry <= state.settings.expiryWarningDays) {
+            alerts.expiringSoon.push({
+                id: product.id, name: product.name, expiryDate: product.expiryDate,
+                daysUntilExpiry: daysUntilExpiry,
+                severity: daysUntilExpiry <= 7 ? 'high' : 'medium',
+                message: `${daysUntilExpiry <= 7 ? 'URGENT' : 'WARNING'}: ${product.name} expires in ${daysUntilExpiry} days`
+            });
+        }
+        
+        if (product.stock <= 0) {
+            alerts.outOfStock.push({
+                id: product.id, name: product.name, currentStock: product.stock,
+                severity: 'critical', message: `CRITICAL: ${product.name} is out of stock`
+            });
+        } else if (product.stock <= state.settings.lowStockThreshold) {
+            alerts.lowStock.push({
+                id: product.id, name: product.name, currentStock: product.stock,
+                threshold: state.settings.lowStockThreshold,
+                severity: product.stock <= state.settings.lowStockThreshold / 2 ? 'high' : 'medium',
+                message: `${product.stock <= state.settings.lowStockThreshold / 2 ? 'URGENT' : 'WARNING'}: ${product.name} has only ${product.stock} items left (threshold: ${state.settings.lowStockThreshold})`
+            });
+        }
+    });
+    
+    const allAlerts = [
+        ...alerts.expired, ...alerts.outOfStock,
+        ...alerts.expiringSoon.filter(a => a.severity === 'high'),
+        ...alerts.lowStock.filter(a => a.severity === 'high'),
+        ...alerts.expiringSoon.filter(a => a.severity === 'medium'),
+        ...alerts.lowStock.filter(a => a.severity === 'medium')
+    ];
+    
+    state.stockAlerts = allAlerts;
+    saveToLocalStorage();
+    
+    const criticalAlerts = allAlerts.filter(alert => alert.severity === 'critical');
+    if (criticalAlerts.length > 0) {
+        showNotification(`${criticalAlerts.length} critical stock alerts detected! Check Analytics page for details.`, 'error');
+    }
+    
+    return allAlerts;
+}
+
 // UI Functions
 function showLogin() {
     show(DOM.loginPage);
@@ -442,6 +872,7 @@ async function showApp() {
     } catch (error) {
         console.error('Error loading initial data:', error);
         showNotification('Error loading data. Using offline cache.', 'warning');
+        
         loadProducts();
         loadSales();
         setupRealtimeListeners();
@@ -509,8 +940,11 @@ function loadProducts() {
         }
         
         let stockClass = 'stock-high';
-        if (product.stock <= 0) stockClass = 'stock-low';
-        else if (product.stock <= state.settings.lowStockThreshold) stockClass = 'stock-medium';
+        if (product.stock <= 0) {
+            stockClass = 'stock-low';
+        } else if (product.stock <= state.settings.lowStockThreshold) {
+            stockClass = 'stock-medium';
+        }
         
         const productCard = document.createElement('div');
         productCard.className = 'product-card';
@@ -587,6 +1021,17 @@ function updateCart() {
     DOM.totalEl.textContent = formatCurrency(total);
 }
 
+// Placeholder functions for brevity - implement as needed
+function loadInventory() { /* Implementation for loading inventory page */ }
+function loadReports() { /* Implementation for loading reports page */ }
+function loadAccount() { /* Implementation for loading account page */ }
+function loadExpenses() { /* Implementation for loading expenses page */ }
+function loadPurchases() { /* Implementation for loading purchases page */ }
+function loadAnalytics() { /* Implementation for loading analytics page */ }
+function refreshAllData() { /* Implementation for refreshing all data */ }
+function updateQuantity(id, change) { /* Implementation for updating cart quantity */ }
+function completeSale() { /* Implementation for completing a sale */ }
+
 // Event Listeners
 DOM.loginForm.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -654,17 +1099,3 @@ async function init() {
 
 // Start app
 init();
-
-// Placeholder functions for brevity - implement as needed
-function setupRealtimeListeners() { /* ... */ }
-function loadSales() { /* ... */ }
-function loadInventory() { /* ... */ }
-function loadReports() { /* ... */ }
-function loadAccount() { /* ... */ }
-function loadExpenses() { /* ... */ }
-function loadPurchases() { /* ... */ }
-function loadAnalytics() { /* ... */ }
-function addToSyncQueue(op) { /* ... */ }
-function checkSupabaseConnection() { /* ... */ }
-function updateQuantity(id, change) { /* ... */ }
-function completeSale() { /* ... */ }
